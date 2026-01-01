@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -162,6 +163,71 @@ def extract_still(ffmpeg_path: str, src: Path, dst: Path, cover_time: float) -> 
     )
 
 
+def build_apple_makernote(content_id: str) -> bytes:
+    content_id = content_id.strip().upper()
+    if len(content_id) != 36:
+        raise ValueError("ContentIdentifier must be a UUID.")
+    value = content_id.encode("ascii") + b"\x00"
+    header = b"Apple iOS\x00\x00\x01MM\x00\x01"
+    value_offset = len(header) + 12 + 4
+    entry = struct.pack(">HHII", 0x0011, 0x0002, len(value), value_offset)
+    return header + entry + struct.pack(">I", 0) + value
+
+
+def build_exif_with_makernote(makernote: bytes) -> bytes:
+    tiff_header = b"MM" + struct.pack(">H", 0x002A) + struct.pack(">I", 8)
+    ifd0_offset = 8
+    exif_ifd_offset = ifd0_offset + 2 + 12 + 4
+    makernote_offset = exif_ifd_offset + 2 + 12 + 4
+    ifd0 = (
+        struct.pack(">H", 1)
+        + struct.pack(">HHII", 0x8769, 4, 1, exif_ifd_offset)
+        + struct.pack(">I", 0)
+    )
+    exif_ifd = (
+        struct.pack(">H", 1)
+        + struct.pack(">HHII", 0x927C, 7, len(makernote), makernote_offset)
+        + struct.pack(">I", 0)
+    )
+    return b"Exif\x00\x00" + tiff_header + ifd0 + exif_ifd + makernote
+
+
+def inject_exif(image_path: Path, exif_payload: bytes) -> None:
+    data = image_path.read_bytes()
+    if not data.startswith(b"\xFF\xD8"):
+        raise ValueError("Not a JPEG file.")
+    segment = b"\xFF\xE1" + struct.pack(">H", len(exif_payload) + 2) + exif_payload
+    out = bytearray()
+    out.extend(data[:2])
+    out.extend(segment)
+    pos = 2
+    while pos + 4 <= len(data):
+        if data[pos] != 0xFF:
+            out.extend(data[pos:])
+            break
+        marker = data[pos + 1]
+        if marker == 0xDA:
+            out.extend(data[pos:])
+            break
+        seg_len = struct.unpack(">H", data[pos + 2 : pos + 4])[0]
+        seg_end = pos + 2 + seg_len
+        if marker == 0xE1 and data[pos + 4 : pos + 10] == b"Exif\x00\x00":
+            pos = seg_end
+            continue
+        out.extend(data[pos:seg_end])
+        pos = seg_end
+    image_path.write_bytes(out)
+
+
+def ensure_image_content_id(image_path: Path, content_id: str) -> None:
+    needle = content_id.strip().upper().encode("ascii")
+    if needle in image_path.read_bytes():
+        return
+    makernote = build_apple_makernote(content_id)
+    exif_payload = build_exif_with_makernote(makernote)
+    inject_exif(image_path, exif_payload)
+
+
 def write_metadata(exiftool_path: str, image_path: Path, video_path: Path, content_id: str) -> None:
     run_cmd(
         [
@@ -171,6 +237,7 @@ def write_metadata(exiftool_path: str, image_path: Path, video_path: Path, conte
             f"-QuickTime:ContentIdentifier={content_id}",
             "-QuickTime:LivePhoto=1",
             "-QuickTime:LivePhotoAuto=1",
+            "-QuickTime:StillImageTime=0",
             str(video_path),
         ],
         "exiftool video",
@@ -186,6 +253,7 @@ def write_metadata(exiftool_path: str, image_path: Path, video_path: Path, conte
         ],
         "exiftool image",
     )
+    ensure_image_content_id(image_path, content_id)
 
 
 def pack_livp(photo_path: Path, video_path: Path, out_path: Path, internal_base: str) -> None:
