@@ -1,0 +1,57 @@
+name: Build LIVP (macOS)
+
+on:
+  push:
+    paths:
+      - "action_input/**"
+      - "tools/livp_action/**"
+      - ".github/workflows/livp-macos.yml"
+  workflow_dispatch:
+    inputs:
+      cover_time:
+        description: "Cover frame time in seconds"
+        required: false
+        default: "0.5"
+      max_duration:
+        description: "Max video duration in seconds"
+        required: false
+        default: "2.9"
+      fps:
+        description: "Output FPS"
+        required: false
+        default: "30"
+      max_width:
+        description: "Max width"
+        required: false
+        default: "3840"
+      max_height:
+        description: "Max height"
+        required: false
+        default: "2160"
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          if ! command -v ffmpeg >/dev/null; then brew install ffmpeg; fi
+          if ! command -v exiftool >/dev/null; then brew install exiftool; fi
+      - name: Build LIVP
+        run: |
+          python3 tools/livp_action/make_livp.py \
+            --input action_input \
+            --output action_output \
+            --cover-time "${{ inputs.cover_time }}" \
+            --max-duration "${{ inputs.max_duration }}" \
+            --fps "${{ inputs.fps }}" \
+            --max-width "${{ inputs.max_width }}" \
+            --max-height "${{ inputs.max_height }}"
+      - name: Upload LIVP
+        uses: actions/upload-artifact@v4
+        with:
+          name: livp_output
+          path: action_output/*.livp
+          if-no-files-found: error
