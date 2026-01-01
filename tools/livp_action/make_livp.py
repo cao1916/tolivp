@@ -64,7 +64,7 @@ def build_video(
     max_height: int,
 ) -> None:
     vf = (
-        f"scale=min({max_width},iw):min({max_height},ih):"
+        f"scale=min({max_width}\\,iw):min({max_height}\\,ih):"
         "force_original_aspect_ratio=decrease,"
         "scale=trunc(iw/2)*2:trunc(ih/2)*2,"
         f"fps={fps}"
