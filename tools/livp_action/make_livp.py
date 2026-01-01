@@ -257,12 +257,40 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Build LIVP files on macOS.")
     parser.add_argument("--input", required=True, help="Input folder with source videos.")
     parser.add_argument("--output", required=True, help="Output folder for .livp files.")
-    parser.add_argument("--cover-time", type=float, default=0.5, help="Cover frame time in seconds.")
-    parser.add_argument("--max-duration", type=float, default=2.9, help="Max duration in seconds.")
-    parser.add_argument("--fps", type=int, default=30, help="Output FPS.")
-    parser.add_argument("--max-width", type=int, default=3840, help="Max width.")
-    parser.add_argument("--max-height", type=int, default=2160, help="Max height.")
+    parser.add_argument("--cover-time", type=str, default="0.5", help="Cover frame time in seconds.")
+    parser.add_argument("--max-duration", type=str, default="2.9", help="Max duration in seconds.")
+    parser.add_argument("--fps", type=str, default="30", help="Output FPS.")
+    parser.add_argument("--max-width", type=str, default="3840", help="Max width.")
+    parser.add_argument("--max-height", type=str, default="2160", help="Max height.")
     args = parser.parse_args()
+
+    def _parse_float(value: str, default: float, label: str) -> float:
+        text = "" if value is None else str(value).strip()
+        if not text:
+            return default
+        try:
+            return float(text)
+        except ValueError as exc:
+            raise ValueError(f"{label} must be a number.") from exc
+
+    def _parse_int(value: str, default: int, label: str) -> int:
+        text = "" if value is None else str(value).strip()
+        if not text:
+            return default
+        try:
+            return int(float(text))
+        except ValueError as exc:
+            raise ValueError(f"{label} must be a number.") from exc
+
+    try:
+        cover_time = _parse_float(args.cover_time, 0.5, "--cover-time")
+        max_duration = _parse_float(args.max_duration, 2.9, "--max-duration")
+        fps = _parse_int(args.fps, 30, "--fps")
+        max_width = _parse_int(args.max_width, 3840, "--max-width")
+        max_height = _parse_int(args.max_height, 2160, "--max-height")
+    except ValueError as exc:
+        print(f"Argument error: {exc}")
+        return 2
 
     ffmpeg_path = shutil.which("ffmpeg") or "ffmpeg"
     ffprobe_path = shutil.which("ffprobe") or "ffprobe"
@@ -295,11 +323,11 @@ def main() -> int:
                 src,
                 output_dir,
                 idx,
-                args.cover_time,
-                args.max_duration,
-                args.fps,
-                args.max_width,
-                args.max_height,
+                cover_time,
+                max_duration,
+                fps,
+                max_width,
+                max_height,
             )
             print(f"Output: {out_path.name}")
         except Exception as exc:

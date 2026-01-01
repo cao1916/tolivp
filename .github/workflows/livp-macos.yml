@@ -40,15 +40,21 @@ jobs:
           if ! command -v ffmpeg >/dev/null; then brew install ffmpeg; fi
           if ! command -v exiftool >/dev/null; then brew install exiftool; fi
       - name: Build LIVP
+        env:
+          COVER_TIME: ${{ github.event.inputs.cover_time || '0.5' }}
+          MAX_DURATION: ${{ github.event.inputs.max_duration || '2.9' }}
+          FPS: ${{ github.event.inputs.fps || '30' }}
+          MAX_WIDTH: ${{ github.event.inputs.max_width || '3840' }}
+          MAX_HEIGHT: ${{ github.event.inputs.max_height || '2160' }}
         run: |
           python3 tools/livp_action/make_livp.py \
             --input action_input \
             --output action_output \
-            --cover-time "${{ inputs.cover_time }}" \
-            --max-duration "${{ inputs.max_duration }}" \
-            --fps "${{ inputs.fps }}" \
-            --max-width "${{ inputs.max_width }}" \
-            --max-height "${{ inputs.max_height }}"
+            --cover-time "$COVER_TIME" \
+            --max-duration "$MAX_DURATION" \
+            --fps "$FPS" \
+            --max-width "$MAX_WIDTH" \
+            --max-height "$MAX_HEIGHT"
       - name: Upload LIVP
         uses: actions/upload-artifact@v4
         with:
