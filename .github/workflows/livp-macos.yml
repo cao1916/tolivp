@@ -41,7 +41,7 @@ jobs:
           python3 -m venv .venv
           . .venv/bin/activate
           python -m pip install --upgrade pip
-          python -m pip install makelive
+          python -m pip install makelive pyobjc-framework-CoreMedia
       - name: Build LIVP
         env:
           COVER_TIME: ${{ github.event.inputs.cover_time || '0.5' }}

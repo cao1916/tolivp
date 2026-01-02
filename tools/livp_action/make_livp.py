@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import argparse
 import shutil
-import struct
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import uuid
 import zipfile
 from datetime import datetime
@@ -163,83 +164,210 @@ def extract_still(ffmpeg_path: str, src: Path, dst: Path, cover_time: float) -> 
     )
 
 
-def build_apple_makernote(content_id: str) -> bytes:
-    content_id = content_id.strip().upper()
-    if len(content_id) != 36:
-        raise ValueError("ContentIdentifier must be a UUID.")
-    value = content_id.encode("ascii") + b"\x00"
-    header = b"Apple iOS\x00\x00\x01MM\x00\x01"
-    value_offset = len(header) + 12 + 4
-    entry = struct.pack(">HHII", 0x0011, 0x0002, len(value), value_offset)
-    return header + entry + struct.pack(">I", 0) + value
-
-
-def build_exif_with_makernote(makernote: bytes) -> bytes:
-    tiff_header = b"MM" + struct.pack(">H", 0x002A) + struct.pack(">I", 8)
-    ifd0_offset = 8
-    exif_ifd_offset = ifd0_offset + 2 + 12 + 4
-    makernote_offset = exif_ifd_offset + 2 + 12 + 4
-    ifd0 = (
-        struct.pack(">H", 1)
-        + struct.pack(">HHII", 0x8769, 4, 1, exif_ifd_offset)
-        + struct.pack(">I", 0)
-    )
-    exif_ifd = (
-        struct.pack(">H", 1)
-        + struct.pack(">HHII", 0x927C, 7, len(makernote), makernote_offset)
-        + struct.pack(">I", 0)
-    )
-    return b"Exif\x00\x00" + tiff_header + ifd0 + exif_ifd + makernote
-
-
-def inject_exif(image_path: Path, exif_payload: bytes) -> None:
-    data = image_path.read_bytes()
-    if not data.startswith(b"\xFF\xD8"):
-        raise ValueError("Not a JPEG file.")
-    segment = b"\xFF\xE1" + struct.pack(">H", len(exif_payload) + 2) + exif_payload
-    out = bytearray()
-    out.extend(data[:2])
-    out.extend(segment)
-    pos = 2
-    while pos + 4 <= len(data):
-        if data[pos] != 0xFF:
-            out.extend(data[pos:])
-            break
-        marker = data[pos + 1]
-        if marker == 0xDA:
-            out.extend(data[pos:])
-            break
-        seg_len = struct.unpack(">H", data[pos + 2 : pos + 4])[0]
-        seg_end = pos + 2 + seg_len
-        if marker == 0xE1 and data[pos + 4 : pos + 10] == b"Exif\x00\x00":
-            pos = seg_end
-            continue
-        out.extend(data[pos:seg_end])
-        pos = seg_end
-    image_path.write_bytes(out)
-
-
-def ensure_image_content_id(image_path: Path, content_id: str) -> None:
-    needle = content_id.strip().upper().encode("ascii")
-    if needle in image_path.read_bytes():
-        return
-    makernote = build_apple_makernote(content_id)
-    exif_payload = build_exif_with_makernote(makernote)
-    inject_exif(image_path, exif_payload)
-
-
-def write_metadata(exiftool_path: str, image_path: Path, video_path: Path, content_id: str) -> None:
+def add_still_image_time_track(video_path: Path, content_id: str) -> None:
+    if sys.platform != "darwin":
+        raise RuntimeError("Live Photo metadata requires macOS.")
     try:
-        from makelive import make_live_photo
+        import AVFoundation
+        import CoreMedia
+        from Foundation import NSURL
+    except Exception as exc:
+        raise RuntimeError(
+            "AVFoundation/CoreMedia are required. Install makelive (pyobjc) first."
+        ) from exc
+
+    def unwrap_objc(result, label: str):
+        if isinstance(result, tuple):
+            obj, error = result
+            if error:
+                raise RuntimeError(f"{label} failed: {error}")
+            return obj
+        return result
+
+    def unwrap_coremedia(result, label: str):
+        if isinstance(result, tuple):
+            first, second = result
+            if isinstance(first, int):
+                status, obj = first, second
+            else:
+                obj, status = first, second
+            if status not in (0, None):
+                raise RuntimeError(f"{label} failed: {status}")
+            return obj
+        return result
+
+    k_key_content_identifier = "com.apple.quicktime.content.identifier"
+    k_key_still_image_time = "com.apple.quicktime.still-image-time"
+    tmp_path = video_path.with_name(f".{video_path.stem}_livephoto.mov")
+    if tmp_path.exists():
+        tmp_path.unlink()
+
+    try:
+        asset = AVFoundation.AVAsset.assetWithURL_(NSURL.fileURLWithPath_(str(video_path)))
+        writer = unwrap_objc(
+            AVFoundation.AVAssetWriter.alloc().initWithURL_fileType_error_(
+                NSURL.fileURLWithPath_(str(tmp_path)),
+                AVFoundation.AVFileTypeQuickTimeMovie,
+                None,
+            ),
+            "AVAssetWriter",
+        )
+        reader = unwrap_objc(
+            AVFoundation.AVAssetReader.assetReaderWithAsset_error_(asset, None),
+            "AVAssetReader",
+        )
+
+        cid_item = AVFoundation.AVMutableMetadataItem.metadataItem()
+        cid_item.setKey_(k_key_content_identifier)
+        cid_item.setKeySpace_("mdta")
+        cid_item.setValue_(content_id)
+        cid_item.setDataType_("com.apple.metadata.datatype.UTF-8")
+        writer.setMetadata_([cid_item])
+
+        video_tracks = asset.tracksWithMediaType_(AVFoundation.AVMediaTypeVideo)
+        if not video_tracks:
+            raise RuntimeError("No video track found.")
+        video_track = video_tracks[0]
+        video_output = AVFoundation.AVAssetReaderTrackOutput.alloc().initWithTrack_outputSettings_(
+            video_track, None
+        )
+        if reader.canAddOutput_(video_output):
+            reader.addOutput_(video_output)
+        else:
+            raise RuntimeError("Cannot add video reader output.")
+        video_input = AVFoundation.AVAssetWriterInput.assetWriterInputWithMediaType_outputSettings_(
+            AVFoundation.AVMediaTypeVideo, None
+        )
+        video_input.setExpectsMediaDataInRealTime_(False)
+        video_input.setTransform_(video_track.preferredTransform())
+        if writer.canAddInput_(video_input):
+            writer.addInput_(video_input)
+        else:
+            raise RuntimeError("Cannot add video writer input.")
+
+        audio_input = None
+        audio_output = None
+        audio_tracks = asset.tracksWithMediaType_(AVFoundation.AVMediaTypeAudio)
+        if audio_tracks:
+            audio_track = audio_tracks[0]
+            audio_output = AVFoundation.AVAssetReaderTrackOutput.alloc().initWithTrack_outputSettings_(
+                audio_track, None
+            )
+            if reader.canAddOutput_(audio_output):
+                reader.addOutput_(audio_output)
+            else:
+                raise RuntimeError("Cannot add audio reader output.")
+            audio_input = AVFoundation.AVAssetWriterInput.assetWriterInputWithMediaType_outputSettings_(
+                AVFoundation.AVMediaTypeAudio, None
+            )
+            audio_input.setExpectsMediaDataInRealTime_(False)
+            if writer.canAddInput_(audio_input):
+                writer.addInput_(audio_input)
+            else:
+                raise RuntimeError("Cannot add audio writer input.")
+
+        spec = {
+            CoreMedia.kCMMetadataFormatDescriptionMetadataSpecificationKey_Identifier: (
+                f"mdta/{k_key_still_image_time}"
+            ),
+            CoreMedia.kCMMetadataFormatDescriptionMetadataSpecificationKey_DataType: (
+                "com.apple.metadata.datatype.int8"
+            ),
+        }
+        desc = unwrap_coremedia(
+            CoreMedia.CMMetadataFormatDescriptionCreateWithMetadataSpecifications(
+                None,
+                CoreMedia.kCMMetadataFormatType_Boxed,
+                [spec],
+                None,
+            ),
+            "CMMetadataFormatDescriptionCreateWithMetadataSpecifications",
+        )
+        meta_input = AVFoundation.AVAssetWriterInput.assetWriterInputWithMediaType_outputSettings_sourceFormatHint_(
+            AVFoundation.AVMediaTypeMetadata,
+            None,
+            desc,
+        )
+        if writer.canAddInput_(meta_input):
+            writer.addInput_(meta_input)
+        else:
+            raise RuntimeError("Cannot add metadata writer input.")
+        adaptor = AVFoundation.AVAssetWriterInputMetadataAdaptor.assetWriterInputMetadataAdaptorWithAssetWriterInput_(
+            meta_input
+        )
+
+        still_item = AVFoundation.AVMutableMetadataItem.metadataItem()
+        still_item.setKey_(k_key_still_image_time)
+        still_item.setKeySpace_("mdta")
+        still_item.setValue_(0)
+        still_item.setDataType_("com.apple.metadata.datatype.int8")
+        time_range = CoreMedia.CMTimeRangeMake(
+            CoreMedia.CMTimeMake(0, 1000),
+            CoreMedia.CMTimeMake(200, 3000),
+        )
+
+        if not writer.startWriting():
+            raise RuntimeError(f"AVAssetWriter start failed: {writer.error()}")
+        if not reader.startReading():
+            raise RuntimeError(f"AVAssetReader start failed: {reader.error()}")
+        writer.startSessionAtSourceTime_(CoreMedia.kCMTimeZero)
+        adaptor.appendTimedMetadataGroup_(
+            AVFoundation.AVTimedMetadataGroup.alloc().initWithItems_timeRange_(
+                [still_item], time_range
+            )
+        )
+
+        def copy_track(output, writer_input, label: str) -> None:
+            while reader.status() == AVFoundation.AVAssetReaderStatusReading:
+                if writer_input.isReadyForMoreMediaData():
+                    sample = output.copyNextSampleBuffer()
+                    if sample is None:
+                        break
+                    if not writer_input.appendSampleBuffer_(sample):
+                        raise RuntimeError(f"{label} append failed.")
+                else:
+                    time.sleep(0.01)
+            writer_input.markAsFinished()
+
+        copy_track(video_output, video_input, "video")
+        if audio_input and audio_output:
+            copy_track(audio_output, audio_input, "audio")
+
+        if reader.status() == AVFoundation.AVAssetReaderStatusFailed:
+            raise RuntimeError(f"AVAssetReader failed: {reader.error()}")
+
+        done = threading.Event()
+
+        def finish_handler():
+            done.set()
+
+        writer.finishWritingWithCompletionHandler_(finish_handler)
+        done.wait()
+        if writer.status() != AVFoundation.AVAssetWriterStatusCompleted:
+            raise RuntimeError(f"AVAssetWriter failed: {writer.error()}")
+
+        tmp_path.replace(video_path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
+
+def write_metadata(image_path: Path, video_path: Path, content_id: str) -> None:
+    if sys.platform != "darwin":
+        raise RuntimeError("Live Photo metadata requires macOS.")
+    try:
+        from makelive.makelive import add_asset_id_to_image_file
     except Exception as exc:
         raise RuntimeError(
             "makelive is required to write Live Photo metadata on macOS. "
-            "Install it with: python3 -m pip install makelive"
+            "Install it with: python3 -m pip install makelive pyobjc-framework-CoreMedia"
         ) from exc
     try:
-        make_live_photo(str(image_path), str(video_path), content_id)
+        add_asset_id_to_image_file(str(image_path), content_id)
+        add_still_image_time_track(video_path, content_id)
     except Exception as exc:
-        raise RuntimeError(f"makelive failed: {exc}") from exc
+        raise RuntimeError(f"Live Photo metadata failed: {exc}") from exc
 
 
 def pack_livp(photo_path: Path, video_path: Path, out_path: Path, internal_base: str) -> None:
@@ -269,7 +397,6 @@ def pack_livp(photo_path: Path, video_path: Path, out_path: Path, internal_base:
 def build_livp(
     ffmpeg_path: str,
     ffprobe_path: str,
-    exiftool_path: str,
     src: Path,
     out_dir: Path,
     index: int,
@@ -301,7 +428,7 @@ def build_livp(
             max_height,
         )
         extract_still(ffmpeg_path, tmp_mov, tmp_jpeg, cover_time)
-        write_metadata(exiftool_path, tmp_jpeg, tmp_mov, content_id)
+        write_metadata(tmp_jpeg, tmp_mov, content_id)
         pack_livp(tmp_jpeg, tmp_mov, out_path, internal_base)
 
     return out_path
@@ -348,7 +475,6 @@ def main() -> int:
 
     ffmpeg_path = shutil.which("ffmpeg") or "ffmpeg"
     ffprobe_path = shutil.which("ffprobe") or "ffprobe"
-    exiftool_path = shutil.which("exiftool") or "exiftool"
 
     input_dir = Path(args.input)
     output_dir = Path(args.output)
@@ -373,7 +499,6 @@ def main() -> int:
             out_path = build_livp(
                 ffmpeg_path,
                 ffprobe_path,
-                exiftool_path,
                 src,
                 output_dir,
                 idx,
