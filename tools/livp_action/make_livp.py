@@ -229,31 +229,17 @@ def ensure_image_content_id(image_path: Path, content_id: str) -> None:
 
 
 def write_metadata(exiftool_path: str, image_path: Path, video_path: Path, content_id: str) -> None:
-    run_cmd(
-        [
-            exiftool_path,
-            "-m",
-            "-overwrite_original",
-            f"-QuickTime:ContentIdentifier={content_id}",
-            "-QuickTime:LivePhoto=1",
-            "-QuickTime:LivePhotoAuto=1",
-            "-QuickTime:StillImageTime=0",
-            str(video_path),
-        ],
-        "exiftool video",
-    )
-    run_cmd(
-        [
-            exiftool_path,
-            "-m",
-            "-overwrite_original",
-            f"-Apple:ContentIdentifier={content_id}",
-            f"-XMP:AssetIdentifier={content_id}",
-            str(image_path),
-        ],
-        "exiftool image",
-    )
-    ensure_image_content_id(image_path, content_id)
+    try:
+        from makelive import make_live_photo
+    except Exception as exc:
+        raise RuntimeError(
+            "makelive is required to write Live Photo metadata on macOS. "
+            "Install it with: python3 -m pip install makelive"
+        ) from exc
+    try:
+        make_live_photo(str(image_path), str(video_path), content_id)
+    except Exception as exc:
+        raise RuntimeError(f"makelive failed: {exc}") from exc
 
 
 def pack_livp(photo_path: Path, video_path: Path, out_path: Path, internal_base: str) -> None:

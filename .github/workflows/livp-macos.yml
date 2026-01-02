@@ -38,7 +38,8 @@ jobs:
       - name: Install dependencies
         run: |
           if ! command -v ffmpeg >/dev/null; then brew install ffmpeg; fi
-          if ! command -v exiftool >/dev/null; then brew install exiftool; fi
+          python3 -m pip install --upgrade pip
+          python3 -m pip install makelive
       - name: Build LIVP
         env:
           COVER_TIME: ${{ github.event.inputs.cover_time || '0.5' }}
