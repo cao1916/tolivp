@@ -38,8 +38,10 @@ jobs:
       - name: Install dependencies
         run: |
           if ! command -v ffmpeg >/dev/null; then brew install ffmpeg; fi
-          python3 -m pip install --upgrade pip
-          python3 -m pip install makelive
+          python3 -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install makelive
       - name: Build LIVP
         env:
           COVER_TIME: ${{ github.event.inputs.cover_time || '0.5' }}
@@ -48,7 +50,7 @@ jobs:
           MAX_WIDTH: ${{ github.event.inputs.max_width || '3840' }}
           MAX_HEIGHT: ${{ github.event.inputs.max_height || '2160' }}
         run: |
-          python3 tools/livp_action/make_livp.py \
+          .venv/bin/python tools/livp_action/make_livp.py \
             --input action_input \
             --output action_output \
             --cover-time "$COVER_TIME" \
