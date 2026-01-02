@@ -316,6 +316,7 @@ def add_still_image_time_track(video_path: Path, content_id: str) -> None:
                 [still_item], time_range
             )
         )
+        meta_input.markAsFinished()
 
         def copy_track(output, writer_input, label: str) -> None:
             while reader.status() == AVFoundation.AVAssetReaderStatusReading:
@@ -342,7 +343,9 @@ def add_still_image_time_track(video_path: Path, content_id: str) -> None:
             done.set()
 
         writer.finishWritingWithCompletionHandler_(finish_handler)
-        done.wait()
+        if not done.wait(60):
+            writer.cancelWriting()
+            raise RuntimeError("AVAssetWriter timed out.")
         if writer.status() != AVFoundation.AVAssetWriterStatusCompleted:
             raise RuntimeError(f"AVAssetWriter failed: {writer.error()}")
 
